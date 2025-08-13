@@ -12,7 +12,7 @@ from gomoku.llm.openai_client import OpenAIGomokuClient
 from gomoku.core.game_logic import GomokuGame
 
 
-class StudentLLMAgent(Agent):
+class StudentLLMAgentV1(Agent):
     def __init__(self, agent_id: str):
         super().__init__(agent_id)
 
