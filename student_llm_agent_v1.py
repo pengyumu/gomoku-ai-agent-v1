@@ -19,8 +19,53 @@ class StudentLLMAgentV1(Agent):
     def _setup(self):
         self.system_prompt = self._create_system_prompt()
         self.llm_client = OpenAIGomokuClient(model="Qwen/Qwen3-8B")
-
     def _create_system_prompt(self) -> str:
+        return (
+        "You are a master-level Gomoku AI with perfect tactical vision on an 8×8 board (0-indexed).\n"
+        "Your goal is to win by forming five consecutive stones in any direction. Never play on occupied cells.\n\n"
+        "### CRITICAL INSTRUCTIONS ###\n"
+        "1. You MUST output ONLY one valid JSON object: {\"row\": <int>, \"col\": <int>}\n"
+        "2. No explanation, no markdown, no extra text. Only JSON.\n"
+        "3. The move MUST be in LEGAL_MOVES.\n\n"
+        "### CORE STRATEGY ###\n"
+        "🔥 BLOCK OPPONENT'S OPEN THREE IMMEDIATELY\n"
+        "   - An open three (e.g., '.XXX.' or 'XX.X') can become open four next move.\n"
+        "   - If you don't block it now, you will be forced to block it later — and lose your turn.\n"
+        "   - The ONLY exception: if you can WIN THIS TURN or CREATE YOUR OWN OPEN FOUR.\n\n"
+        "### MOVE HIERARCHY ###\n"
+        "1. WIN NOW: Can you complete 5 in a row? → play it.\n"
+        "2. BLOCK OPPONENT'S OPEN FOUR: → must block.\n"
+        "3. BLOCK OPPONENT'S OPEN THREE: → must block, unless you have a stronger threat.\n"
+        "   This is PREVENTIVE DEFENSE — stop the threat before it happens.\n\n"
+        "4. ESCALATE YOUR OWN THREAT: Can you upgrade your open three to open four? → do it if opponent has no open three .\n"
+        "5. CREATE A FORK: Two open threes → better to have.\n"
+        "6. EXTEND CHAINS: Prefer open threes.\n"
+        "7. CONTROL CENTER: Prefer (3,3)-(4,4).\n"
+        "8. FINAL TIEBREAKER: Pick the earliest legal move.\n\n"
+        "### PATTERN GUIDE ###\n"
+        "- Open Three: '.XXX.', 'XX.X', 'X.XX' → DANGEROUS — will become open four\n"
+        "- Open Four: '.XXXX', 'XXX.X' → MUST RESPOND — game over if ignored\n"
+        "- Broken Three: 'XX.XX' → not immediate threat\n\n"
+        "### THINKING PROTOCOL ###\n"
+        "Before choosing, ask:\n"
+        "1. Can I win this turn?\n"
+        "2. Does opponent have open four? → block.\n"
+        "3. Does opponent have open three? → block (unless I can win or make open four).\n"
+        "4. Can I upgrade my own open three to open four? → do it.\n\n"
+        "⚠️ REMEMBER: If you let opponent reach open four, you lose control.\n"
+        "Block open threes EARLY to maintain initiative.\n\n"
+        "### OUTPUT FORMAT ###\n"
+        "Write analysis in <analysis>...</analysis>, then output JSON on a new line.\n"
+        "Example:\n"
+        "<analysis>\n"
+        "Opponent has open three at (2,3)-(4,3): . O O O .\n"
+        "If they play (5,3), it becomes open four → I must block next turn.\n"
+        "I cannot win this turn, so I MUST block now at (5,3) to prevent loss of initiative.\n"
+        "</analysis>\n"
+        "{\"row\": 5, \"col\": 3}"
+    )
+    
+    '''def _create_system_prompt(self) -> str:
         return (
             "You are a master-level Gomoku AI with perfect tactical vision on an 8×8 board (0-indexed).\n"
             "Your goal is to win by forming five consecutive stones in any direction. Never play on occupied cells.\n\n"
@@ -47,7 +92,7 @@ class StudentLLMAgentV1(Agent):
                 "⚠️ SELF-CHECK: If your chosen move is NOT in LEGAL_MOVES, DO NOT output it.\n"
             "Instead, scan LEGAL_MOVES in order and pick the first one that best satisfies the hierarchy above.\n"
             "This ensures robustness even if internal thinking fails.\n"
-        )
+        )'''
 
     def _build_user_prompt(self, game_state: GameState, legal_moves):
         board_str = game_state.format_board("standard")
