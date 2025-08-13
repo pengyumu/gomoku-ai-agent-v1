@@ -1,6 +1,6 @@
 {
   "name": "StudentLLMAgentV1",
-  "agent_class": "student_llm_agent_V1.StudentLLMAgentV1",
+  "agent_class": "student_llm_agent_v1.StudentLLMAgentV1",
   "author": "Peng Yumu",
   "description": "LLM-based Gomoku agent with strict JSON + legal-moves constraint",
   "version": "1.0.0"
