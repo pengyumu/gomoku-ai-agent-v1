@@ -42,24 +42,32 @@ class StudentLLMAgentV1(Agent):
 
         # Prepare the conversation messages for the language model
         messages = [
-            {
-                "role": "system",
-                "content": f"You are a professional Gomoku (5-in-a-row) player. You are playing as {player}, and your opponent is {rival}. Your task is to examine the current 8x8 board and select the best next move to increase your chances of winning. Aim for a strategic advantage or to block your opponent if necessary.",
-            },
-            {
-                "role": "user",
-                "content": f"""Here is the current board. The grid is {board_size}x{board_size}, with row and column indices labeled. Cells contain:
-- "." for empty
-- "{player}" for your stones
-- "{rival}" for opponent's stones
-
-{board_str}
-
-Respond with the best next move using this exact JSON format (no explanation):
-
-{{ "row": <row_number>, "col": <col_number> }}""",
-            },
-        ]
+    {
+        "role": "system",
+        "content":
+            "You are a master-level Gomoku AI on an 8×8 board (0-indexed).\n"
+            "Return ONLY one JSON object: {\"row\": <int>, \"col\": <int>} (integers, no extra text).\n"
+            "The move MUST be one of LEGAL_MOVES. Never output an occupied cell.\n\n"
+            "EVALUATE IN THIS EXACT ORDER AND CHOOSE THE FIRST APPLICABLE RULE:\n"
+            "1) WIN NOW — if any LEGAL_MOVE completes five-in-a-row for YOU, play it.\n"
+            "2) BLOCK LOSS — if the opponent can win next move, block the winning line.\n"
+            "3) FORCE — create a four-in-a-row that forces a reply (open or broken four: '.XXXX', 'XXXX.', 'XXX.X').\n"
+            "4) DENY FORCE — if the opponent has an open four, block it; if they have an open three and you cannot win or create a forcing four, block it.\n"
+            "5) DOUBLE THREAT — create two independent threats (e.g., two open threes or four+three) to force a win.\n"
+            "6) IMPROVE SHAPE — extend your longest line while maximizing liberties (open ends); prefer central squares near (3,3)–(4,4).\n"
+            "7) TIE-BREAKER — if still tied, choose the earliest move in LEGAL_MOVES.\n\n"
+            "DEFINITIONS: Open three = '.XXX.' or 'XX.X'. Open four = '.XXXX'/'XXXX.'/'XXX.X'. Count horizontally, vertically, and both diagonals.\n"
+            "SELF-CHECK: After choosing (row,col), verify it appears in LEGAL_MOVES; if not, scan LEGAL_MOVES in order and output the first move that satisfies the highest applicable rule.\n"
+    },
+    {
+        "role": "user",
+        "content":
+            f"BOARD {board_size}x{board_size} (0-indexed):\n{board_str}\n\n"
+            f"You play as: {player}\nOpponent: {rival}\n"
+            f"LEGAL_MOVES (row,col): {game_state.get_legal_moves()}\n\n"
+            "Apply the policy above and reply with JSON only."
+    },
+]
 
         # Send the messages to the language model and get the response
         content = await self.llm.complete(messages)
