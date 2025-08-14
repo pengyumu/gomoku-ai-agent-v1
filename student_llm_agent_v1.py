@@ -1,123 +1,283 @@
 import re
 import json
-import asyncio
-import random
-from typing import Tuple, List, Dict
-
-from gomoku.agents.base import Agent
-from gomoku.core.models import GameState, Player
-from gomoku.arena import GomokuArena
-from gomoku.utils import ColorBoardFormatter
-from gomoku.llm.openai_client import OpenAIGomokuClient
-from gomoku.core.game_logic import GomokuGame
-
+from typing import List, Tuple, Optional
+from gomoku import Agent
+from gomoku.llm import OpenAIGomokuClient
+from gomoku.core.models import Player
 
 class StudentLLMAgentV1(Agent):
-    def __init__(self, agent_id: str):
-        super().__init__(agent_id)
+ 
+    RETRIES = 2
+    DIRECTIONS = [(1, 0), (0, 1), (1, 1), (1, -1)]
 
     def _setup(self):
-        self.system_prompt = self._create_system_prompt()
-        self.llm_client = OpenAIGomokuClient(model="Qwen/Qwen3-8B")
-    def _create_system_prompt(self) -> str:
-        return (
-        "You are a master-level Gomoku AI with perfect tactical vision on an 8×8 board (0-indexed).\n"
-        "Your goal is to win by forming five consecutive stones in any direction. Never play on occupied cells.\n\n"
-    )
-    
-    '''def _create_system_prompt(self) -> str:
-        return (
-            "You are a master-level Gomoku AI with perfect tactical vision on an 8×8 board (0-indexed).\n"
-            "Your goal is to win by forming five consecutive stones in any direction. Never play on occupied cells.\n\n"
-            "### CRITICAL INSTRUCTIONS ###\n"
-            "1. You MUST output ONLY one valid JSON object: {\"row\": <int>, \"col\": <int>}\n"
-            "2. No explanation, no markdown, no extra text. Only JSON.\n"
-            "3. The move MUST be in LEGAL_MOVES.\n\n"
-            "### MOVE HIERARCHY (APPLY IN ORDER) ###\n"
-            "Evaluate these conditions strictly from top to bottom:\n"
-            "1️⃣ WIN NOW: If you can complete a five-in-a-row this turn → play that move.\n"
-            "2️⃣ BLOCK IMMINENT LOSS: If opponent has any four-in-a-row (open or closed) → block it immediately.\n"
-            "3️⃣ CREATE AN OPEN FOUR: Place a stone to form a sequence of four of your stones with empty ends.\n"
-            "4️⃣ SET UP A DOUBLE THREAT: Create two simultaneous open threes (fork), forcing a loss for opponent.\n"
-                "5️⃣ EXTEND STRONG CHAINS: Prioritize extending your longest existing lines (especially open threes or broken fours).\n"
-                "6️⃣ CONTROL CENTER & FLEXIBILITY: Prefer central squares (e.g., near (3,3) to (4,4)) and positions that allow multiple future directions.\n"
-                "7️⃣ FINAL TIEBREAKER: Choose the move that appears earliest in the LEGAL_MOVES list.\n\n"
-                "### THINKING PROTOCOL ###\n"
-                "Before choosing, mentally simulate:\n"
-                "- For each candidate move in LEGAL_MOVES:\n"
-                "  a) Would this win me the game?\n"
-                "  b) Does this stop opponent from winning next turn?\n"
-                "  c) Does this create a new open four or double threat?\n"
-                "Prioritize based on the hierarchy above.\n\n"
-                "⚠️ SELF-CHECK: If your chosen move is NOT in LEGAL_MOVES, DO NOT output it.\n"
-            "Instead, scan LEGAL_MOVES in order and pick the first one that best satisfies the hierarchy above.\n"
-            "This ensures robustness even if internal thinking fails.\n"
-        )'''
+        """
+        Initialize the agent by setting up the language model client.
+        This method is called once when the agent is created.
+        """
+        # Create an OpenAI-compatible client using the Gemma2 model for move generation
+        self.llm = OpenAIGomokuClient(model="qwen/qwen3-8b")
 
-    def _build_user_prompt(self, game_state: GameState, legal_moves):
-        board_str = game_state.format_board("standard")
-        you = game_state.current_player.value
-        opp = 'O' if you == 'X' else 'X'
-        legal_list = [[r, c] for (r, c) in legal_moves]
-        return (
-            f"### CURRENT GAME STATE ###\n"
-            f"BOARD (8x8, 0-indexed):\n{board_str}\n\n"
-            f"you_play: {you}\n"
-            f"opponent: {opp}\n\n"
-            f"Available moves (row, col): {legal_list}\n\n"
-            f"Choose your move according to the strategy rules. Output JSON only."
-        )
-    
-    def _safe_extract_json(self, text: str):
+    def _log(self, *a):
+        if self.DEBUG:
+            print("[StudentLLMAgentV1]", *a)
+
+    def _safe_extract_json(self, text) -> Optional[dict]:
+        """
+        Extract first JSON object from model output; repair common issues.
+        Accepts dict or string; returns dict or None.
+        """
+        if isinstance(text, dict):
+            return text
+
+        s = (text or "").strip()
+        # 1) try direct parse
         try:
-            return json.loads(text)
+            return json.loads(s)
         except Exception:
             pass
-        m = re.search(r"\{.*\}", text, re.DOTALL)
+
+        # 2) find the first JSON object (non-greedy)
+        m = re.search(r"\{.*?\}", s, re.DOTALL)
         if not m:
             return None
+
         block = m.group(0)
+        # repair trailing comma
+        block = re.sub(r",\s*}", "}", block)
+
         try:
             return json.loads(block)
         except Exception:
-            cleaned = re.sub(r",\s*}", "}", block)
-            try:
-                return json.loads(cleaned)
-            except Exception:
-                return None
+            return None
+        
+# -------------------- board helpers --------------------
 
-    def _fallback_move(self, game_state: GameState) -> Tuple[int, int]:
+    def _try_cell(self, gs, r: int, c: int) -> Optional[str]:
+        """
+        Return '.', 'X', or 'O' if discoverable; else None.
+        Tries direct internal board first, then falls back to formatted board parsing.
+        """
+        # Try direct grid-like attributes
+        for name in ("board", "grid", "cells", "state", "matrix"):
+            b = getattr(gs, name, None)
+            if b is not None:
+                try:
+                    v = b[r][c]
+                    if v in ('.', 'X', 'O'):
+                        return v
+                    if v in (0, 1, 2):  # numeric encodings common in some engines
+                        return {0: '.', 1: 'X', 2: 'O'}[v]
+                except Exception:
+                    pass
+
+        # Fallback: parse from formatted string
+        try:
+            s = gs.format_board("standard")
+            lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+            n = gs.board_size
+            rows = lines[-n:]
+            row = rows[r]
+            symbols = [ch for ch in row if ch in ('.', 'X', 'O')]
+            if len(symbols) >= n:
+                return symbols[c]
+        except Exception:
+            pass
+
+        return None
+
+    def _count_dir(self, gs, r: int, c: int, dr: int, dc: int, me: str) -> int:
+        n = gs.board_size
+        rr, cc = r + dr, c + dc
+        k = 0
+        while 0 <= rr < n and 0 <= cc < n and self._try_cell(gs, rr, cc) == me:
+            k += 1
+            rr += dr
+            cc += dc
+        return k
+
+    def _is_five_if_play(self, gs, r: int, c: int, me: str) -> bool:
+        """If placing me at (r,c), do we form five-in-a-row?"""
+        if self._try_cell(gs, r, c) != '.':
+            return False
+        for dr, dc in self.DIRECTIONS:
+            a = self._count_dir(gs, r, c, -dr, -dc, me)
+            b = self._count_dir(gs, r, c,  dr,  dc, me)
+            if a + 1 + b >= 5:
+                return True
+        return False
+
+    def _open_four_if_play(self, gs, r: int, c: int, me: str) -> bool:
+        """
+        After placing at (r,c), do we have exactly 4-in-line with at least one open end?
+        This is a forcing shape: opponent must respond.
+        """
+        if self._try_cell(gs, r, c) != '.':
+            return False
+        n = gs.board_size
+        for dr, dc in self.DIRECTIONS:
+            a = self._count_dir(gs, r, c, -dr, -dc, me)
+            b = self._count_dir(gs, r, c,  dr,  dc, me)
+            total = a + 1 + b
+            if total == 4:
+                end1 = (r - (a + 1) * dr, c - (a + 1) * dc)
+                end2 = (r + (b + 1) * dr, c + (b + 1) * dc)
+
+                def open_end(rr, cc):
+                    return 0 <= rr < n and 0 <= cc < n and self._try_cell(gs, rr, cc) == '.'
+
+                if open_end(*end1) or open_end(*end2):
+                    return True
+        return False
+
+    def _double_open_three_if_play(self, gs, r: int, c: int, me: str) -> bool:
+        """
+        Does (r,c) create two distinct open-threes (a fork)?
+        """
+        if self._try_cell(gs, r, c) != '.':
+            return False
+        n = gs.board_size
+        dirs = 0
+        for dr, dc in self.DIRECTIONS:
+            a = self._count_dir(gs, r, c, -dr, -dc, me)
+            b = self._count_dir(gs, r, c,  dr,  dc, me)
+            total = a + 1 + b
+            if total == 3:
+                end1 = (r - (a + 1) * dr, c - (a + 1) * dc)
+                end2 = (r + (b + 1) * dr, c + (b + 1) * dc)
+
+                def open_end(rr, cc):
+                    return 0 <= rr < n and 0 <= cc < n and self._try_cell(gs, rr, cc) == '.'
+
+                if open_end(*end1) and open_end(*end2):
+                    dirs += 1
+        return dirs >= 2
+
+    # -------------------- tactical pre-move --------------------
+
+    def _tactical_move(self, gs, legal_moves: List[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
+        """
+        Hard rules in priority:
+        1) Win now
+        2) Block opponent win now
+        3) Create open four
+        4) Create double open three
+        """
+        me = self.player.value              # 'X' or 'O'
+        opp = 'O' if me == 'X' else 'X'
+
+        # If board unreadable, skip gracefully
+        if self._try_cell(gs, 0, 0) is None:
+            self._log("Board unreadable → skip tactical premove")
+            return None
+
+        # 1) win now
+        for r, c in legal_moves:
+            if self._is_five_if_play(gs, r, c, me):
+                self._log("Tactical: WIN NOW", (r, c))
+                return (r, c)
+
+        # 2) block opponent's immediate win
+        for r, c in legal_moves:
+            if self._is_five_if_play(gs, r, c, opp):
+                self._log("Tactical: BLOCK LOSS", (r, c))
+                return (r, c)
+
+        # 3) create open four
+        for r, c in legal_moves:
+            if self._open_four_if_play(gs, r, c, me):
+                self._log("Tactical: OPEN FOUR", (r, c))
+                return (r, c)
+
+        # 4) create double open three
+        for r, c in legal_moves:
+            if self._double_open_three_if_play(gs, r, c, me):
+                self._log("Tactical: DOUBLE THREE", (r, c))
+                return (r, c)
+
+        return None
+
+    # -------------------- prompts --------------------
+
+    def _system_prompt(self, me: str) -> str:
+        return (
+            "You are a master-level Gomoku AI for an 8x8 board (0-indexed).\n"
+            "Output ONLY one JSON object: {\"row\": <int>, \"col\": <int>}.\n"
+            "The move MUST be in LEGAL_MOVES. No extra text.\n\n"
+            "PRIORITY (choose the highest that applies):\n"
+            "1) WIN NOW (complete five-in-a-row for YOU).\n"
+            "2) BLOCK LOSS (opponent has immediate win next move; block unless you can win now).\n"
+            "3) CREATE OPEN FOUR (forcing).\n"
+            "4) CREATE DOUBLE OPEN THREE (fork).\n"
+            "5) Extend strongest chains; 6) Center/Flexibility; Tie-breaker: earliest in LEGAL_MOVES.\n"
+            "Before output, re-check (row,col) ∈ LEGAL_MOVES; otherwise pick the earliest move satisfying your highest rule.\n"
+        )
+
+    def _user_prompt(self, gs, legal_moves: List[Tuple[int, int]]) -> str:
+        me = self.player.value
+        opp = 'O' if me == 'X' else 'X'
+        board = gs.format_board("standard")
+        n = gs.board_size
+        legal_list = [[r, c] for (r, c) in legal_moves]
+        return (
+            f"BOARD {n}x{n} (0-indexed):\n{board}\n\n"
+            f"You play as: {me}\nOpponent: {opp}\n"
+            f"LEGAL_MOVES: {legal_list}\n"
+            "Return best move as JSON only."
+        )
+
+    # -------------------- main --------------------
+
+    async def get_move(self, game_state):
         legal = game_state.get_legal_moves()
         if not legal:
-            center = game_state.board_size // 2
-            return (center, center)
-        center = game_state.board_size // 2
-        return min(legal, key=lambda rc: abs(rc[0]-center) + abs(rc[1]-center))
+            n = game_state.board_size
+            return (n // 2, n // 2)
 
-    async def get_move(self, game_state: GameState) -> Tuple[int, int]:
-        legal_moves = game_state.get_legal_moves()
-        if not legal_moves:
-            return self._fallback_move(game_state)
+        # 1) Tactical first (hard rules)
+        tmove = self._tactical_move(game_state, legal)
+        if tmove is not None:
+            return tmove
 
-        if not hasattr(self, "llm_client") or self.llm_client is None:
-            return self._fallback_move(game_state)
+        # 2) LLM decision with small retry
+        sys = self._system_prompt(self.player.value)
+        usr = self._user_prompt(game_state, legal)
+        messages = [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
 
-        try:
-            user_prompt = self._build_user_prompt(game_state, legal_moves)
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ]
-            response = await self.llm_client.complete(
-                messages,
-                temperature=0.0,
-                top_p=0.9,
-                max_tokens=128,
-            )
-            data = self._safe_extract_json(response) or {}
-            r, c = data.get("row"), data.get("col")
-            if isinstance(r, int) and isinstance(c, int) and (r, c) in set(legal_moves):
-                return (r, c)
-            return self._fallback_move(game_state)
-        except Exception:
-            return self._fallback_move(game_state)
+        for attempt in range(self.RETRIES):
+            try:
+                self._log(f"Calling LLM (attempt {attempt + 1})…")
+                content = await self.llm.complete(
+                    messages,
+                    temperature=0.0,
+                    top_p=0.9,
+                    max_tokens=128,
+                )
+                self._log("LLM raw:", repr(content)[:160])
+
+                data = self._safe_extract_json(content) or {}
+                r, c = data.get("row"), data.get("col")
+
+                # coerce "3"/3.0 -> 3
+                try:
+                    r = int(float(r))
+                    c = int(float(c))
+                except Exception:
+                    r = c = None
+
+                if (
+                    isinstance(r, int) and isinstance(c, int)
+                    and 0 <= r < game_state.board_size
+                    and 0 <= c < game_state.board_size
+                    and game_state.is_valid_move(r, c)
+                ):
+                    self._log("LLM move →", (r, c))
+                    return (r, c)
+
+                self._log("Invalid LLM move:", data)
+
+            except Exception as e:
+                self._log("LLM exception:", e)
+
+        # 3) Neutral fallback: first legal (avoid center bias)
+        return legal[0]
