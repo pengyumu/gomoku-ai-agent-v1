@@ -42,35 +42,35 @@ class StudentLLMAgentV1(Agent):
 
         # Prepare the conversation messages for the language model
         # Prepare the conversation messages for the language model
-messages = [
-    {
-        "role": "system",
-        "content":
-            "You are a master-level Gomoku AI on an 8×8 board (0-indexed: rows/cols 0..7).\n"
-            "Return ONLY one JSON object exactly as {\"row\": <int>, \"col\": <int>} — no extra text, no code block.\n"
-            "Numbers must be integers (not strings). The move MUST be one of LEGAL_MOVES and on an empty cell.\n\n"
-            "DECISION ORDER (stop at the first that applies):\n"
-            "1) WIN NOW — if any move completes five-in-a-row for YOU, play it.\n"
-            "2) BLOCK LOSS — if the opponent can win next move, block that line (unless you can win now).\n"
-            "3) FORCING FOUR — create a forcing four ('.XXXX', 'XXXX.', or 'XXX.X').\n"
-            "4) OPEN THREE FIRST — when no immediate win/loss threat, prefer making an OPEN THREE for yourself "
-            "   ('.XXX.' or 'XX.X' if you are X; '.OOO.' or 'OO.O' if you are O) near your strongest chain.\n"
-            "5) DOUBLE THREAT — create two independent threats (e.g., two open threes) to force a win.\n"
-            "6) SHAPE & CENTER — otherwise extend your longest line with open ends; prefer central squares around (3,3)–(4,4).\n"
-            "7) TIE-BREAKER — if still tied, choose the earliest move in LEGAL_MOVES.\n"
-            "SELF-CHECK: ensure (row,col) ∈ LEGAL_MOVES and within 0..7. "
-            "If your chosen move is not in LEGAL_MOVES, scan LEGAL_MOVES in order and output the first move that satisfies the highest rule."
-    },
-    {
-        "role": "user",
-        "content":
-            f"BOARD {board_size}x{board_size} (0-indexed):\n{board_str}\n\n"
-            f"You play as: {player}\nOpponent: {rival}\n"
-            "Note: if the board shows the digit '0', treat it exactly as 'O' (white stones).\n"
-            f"LEGAL_MOVES (row,col): {game_state.get_legal_moves()}\n\n"
-            "Apply the policy above and reply with JSON only."
-    },
-]
+        messages = [
+            {
+                "role": "system",
+                "content":
+                    "You are a master-level Gomoku AI on an 8×8 board (0-indexed: rows/cols 0..7).\n"
+                    "Return ONLY one JSON object exactly as {\"row\": <int>, \"col\": <int>} — no extra text, no code block.\n"
+                    "Numbers must be integers (not strings). The move MUST be one of LEGAL_MOVES and on an empty cell.\n\n"
+                    "DECISION ORDER (stop at the first that applies):\n"
+                    "1) WIN NOW — if any move completes five-in-a-row for YOU, play it.\n"
+                    "2) BLOCK LOSS — if the opponent can win next move, block that line (unless you can win now).\n"
+                    "3) FORCING FOUR — create a forcing four ('.XXXX', 'XXXX.', or 'XXX.X').\n"
+                    "4) OPEN THREE FIRST — when no immediate win/loss threat, prefer making an OPEN THREE for yourself "
+                    "   ('.XXX.' or 'XX.X' if you are X; '.OOO.' or 'OO.O' if you are O) near your strongest chain.\n"
+                    "5) DOUBLE THREAT — create two independent threats (e.g., two open threes) to force a win.\n"
+                    "6) SHAPE & CENTER — otherwise extend your longest line with open ends; prefer central squares around (3,3)–(4,4).\n"
+                    "7) TIE-BREAKER — if still tied, choose the earliest move in LEGAL_MOVES.\n"
+                    "SELF-CHECK: ensure (row,col) ∈ LEGAL_MOVES and within 0..7. "
+                    "If your chosen move is not in LEGAL_MOVES, scan LEGAL_MOVES in order and output the first move that satisfies the highest rule."
+            },
+            {
+                "role": "user",
+                "content":
+                    f"BOARD {board_size}x{board_size} (0-indexed):\n{board_str}\n\n"
+                    f"You play as: {player}\nOpponent: {rival}\n"
+                    "Note: if the board shows the digit '0', treat it exactly as 'O' (white stones).\n"
+                    f"LEGAL_MOVES (row,col): {game_state.get_legal_moves()}\n\n"
+                    "Apply the policy above and reply with JSON only."
+            },
+        ]
 
 
         # Send the messages to the language model and get the response
