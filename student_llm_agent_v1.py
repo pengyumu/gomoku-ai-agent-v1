@@ -6,7 +6,7 @@ from gomoku.llm import OpenAIGomokuClient
 from gomoku.core.models import Player
 
 class StudentLLMAgentV1(Agent):
- 
+    DEBUG = False
     RETRIES = 2
     DIRECTIONS = [(1, 0), (0, 1), (1, 1), (1, -1)]
 
