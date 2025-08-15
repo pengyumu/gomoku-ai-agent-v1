@@ -1,4 +1,3 @@
-
 import re
 import json
 from gomoku import Agent
@@ -6,90 +5,174 @@ from gomoku.llm import OpenAIGomokuClient
 from gomoku.core.models import Player
 
 
-class StudentLLMAgentV1(Agent):
-    """
-    A Gomoku AI agent that uses a language model to make strategic moves.
-    Inherits from the base Agent class provided by the Gomoku framework.
-    """
-
+class StudentLLMAgentV2(Agent):
     def _setup(self):
-        """
-        Initialize the agent by setting up the language model client.
-        This method is called once when the agent is created.
-        """
-        # Create an OpenAI-compatible client using the Gemma2 model for move generation
-        self.llm = OpenAIGomokuClient(model="qwen/qwen3-8b")
+        self.llm = OpenAIGomokuClient(model="google/gemma-2-9b-it")
+
+    # ---------- 连子统计：仅从“链头”起数，覆盖横/竖/两斜 ----------
+    def _get_max_chain_head(self, board, p):
+        size = len(board)
+        dirs = [(1,0), (0,1), (1,1), (1,-1)]
+        best = 0
+        for r in range(size):
+            for c in range(size):
+                if board[r][c] != p:
+                    continue
+                for dr, dc in dirs:
+                    pr, pc = r - dr, c - dc
+                    # 仅从链头开始（前一格不是同色或越界）
+                    if 0 <= pr < size and 0 <= pc < size and board[pr][pc] == p:
+                        continue
+                    rr, cc, length = r, c, 0
+                    while 0 <= rr < size and 0 <= cc < size and board[rr][cc] == p:
+                        length += 1
+                        rr += dr
+                        cc += dc
+                    if length > best:
+                        best = length
+        return best
+
+    # ---------- 单手必胜检测：尝试每个合法点，看是否能形成5连 ----------
+    def _has_immediate_win(self, board, legal_moves, p):
+        size = len(board)
+        dirs = [(1,0), (0,1), (1,1), (1,-1)]
+        for r, c in legal_moves:
+            board[r][c] = p  # 临时落子
+            won = False
+            for dr, dc in dirs:
+                cnt = 1
+                # 双向累计
+                for sgn in (+1, -1):
+                    rr, cc = r + sgn*dr, c + sgn*dc
+                    while 0 <= rr < size and 0 <= cc < size and board[rr][cc] == p:
+                        cnt += 1
+                        rr += sgn*dr
+                        cc += sgn*dc
+                if cnt >= 5:
+                    won = True
+                    break
+            board[r][c] = Player.EMPTY.value  # 撤回
+            if won:
+                return (r, c)
+        return None
+
+    def analyze_board(self, game_state):
+        board = game_state.board
+        size = game_state.board_size
+        player = self.player.value
+        rival = (Player.WHITE if self.player == Player.BLACK else Player.BLACK).value
+        EMPTY = Player.EMPTY.value
+
+        # 统计当前已落子数量（用于“开局走中路”的启发式）
+        stones = sum(1 for r in range(size) for c in range(size) if board[r][c] != EMPTY)
+
+        return {
+            "my_chain": self._get_max_chain_head(board, player),
+            "rival_chain": self._get_max_chain_head(board, rival),
+            "player": player,
+            "rival": rival,
+            "stones": stones,
+        }
+
+    # —— 按“离中心距离”对合法点排序 / 取最近点 ——
+    def _sorted_moves_center_first(self, game_state):
+        size = game_state.board_size
+        cx = cy = (size - 1) / 2.0  # 8x8 时中心在(3.5,3.5)
+        moves = list(game_state.get_legal_moves())
+        moves.sort(key=lambda rc: (
+            abs(rc[0] - cx) + abs(rc[1] - cy),            # 先按曼哈顿距离
+            (rc[0] - cx)**2 + (rc[1] - cy)**2,           # 再按欧氏距离平方做细分
+            rc[0], rc[1]                                  # 最后稳定排序
+        ))
+        return moves
+
+    def _nearest_center_move(self, game_state):
+        return self._sorted_moves_center_first(game_state)[0]
 
     async def get_move(self, game_state):
-        """
-        Generate the next move for the current game state using an LLM.
+        stats = self.analyze_board(game_state)
+        player = stats["player"]
+        rival = stats["rival"]
 
-        Args:
-            game_state: Current state of the Gomoku game board
+        # ---------- 1) 规则前置：自己一手赢 / 立即堵 ----------
+        legal_moves = list(game_state.get_legal_moves())
 
-        Returns:
-            tuple: (row, col) coordinates of the chosen move
-        """
-        # Get the current player's symbol (e.g., 'X' or 'O')
-        player = self.player.value
+        # 自己一手致胜
+        win_move = self._has_immediate_win(game_state.board, legal_moves, player)
+        if win_move is not None:
+            return win_move
 
-        # Determine the opponent's symbol by checking which player we are
-        rival = (Player.WHITE if self.player == Player.BLACK else Player.BLACK).value
+        # 对手一手致胜 -> 立刻堵（与对手的必胜点同一空位）
+        block_move = self._has_immediate_win(game_state.board, legal_moves, rival)
+        if block_move is not None and game_state.is_valid_move(*block_move):
+            return block_move
 
-        # Convert the game board to a human-readable string format
+        # ---------- 2) 调用 LLM 的策略提示 ----------
+        base_policy = (
+            "You are a master-level Gomoku AI on an 8×8 board (0-indexed: rows/cols 0..7). "
+            "Return ONLY one JSON object exactly as {\"row\": <int>, \"col\": <int>} — no extra text. "
+            "Numbers must be integers. The move MUST be one of LEGAL_MOVES and on an empty cell.\n"
+            "If there is no immediate win or forced block, prefer the legal move closest to the board center.\n"
+        )
+
+        if stats["my_chain"] >= 4:
+            situation_rules = (
+                "You have 4 consecutive stones (horizontal / vertical / diagonal). "
+                "Place your stone to complete 5 in a line and win immediately.\n"
+            )
+        elif stats["rival_chain"] >= 4:
+            situation_rules = (
+                "Opponent has 4 consecutive stones (horizontal / vertical / diagonal). "
+                "Immediately block to prevent them from winning.\n"
+            )
+        elif stats["my_chain"] < 2 and stats["rival_chain"] < 2:
+            situation_rules = "Early game: extend towards the center; avoid isolated edge moves.\n"
+        elif stats["my_chain"] >= 3:
+            situation_rules = (
+                "You have 3 consecutive stones (horizontal / vertical / diagonal). "
+                "Extend to 4, preferably open-ended.\n"
+            )
+        elif stats["rival_chain"] >= 3:
+            situation_rules = (
+                "Opponent has 3 consecutive stones (horizontal / vertical / diagonal). "
+                "Block them unless you can win immediately.\n"
+            )
+        else:
+            situation_rules = (
+                "Play strategically: extend your longest chain with open ends, prefer central positions.\n"
+            )
+
+        system_prompt = base_policy + situation_rules
+
         board_str = game_state.format_board("standard")
         board_size = game_state.board_size
 
-        # Prepare the conversation messages for the language model
-        # Prepare the conversation messages for the language model
+        # 把 LEGAL_MOVES 以“中心优先”的顺序提供给 LLM，进一步引导它选中路
+        legal_moves_center_first = self._sorted_moves_center_first(game_state)
+
         messages = [
-            {
-                "role": "system",
-                "content":
-                    "You are a master-level Gomoku AI on an 8×8 board (0-indexed: rows/cols 0..7).\n"
-                    "Return ONLY one JSON object exactly as {\"row\": <int>, \"col\": <int>} — no extra text, no code block.\n"
-                    "Numbers must be integers (not strings). The move MUST be one of LEGAL_MOVES and on an empty cell.\n\n"
-                    "DECISION ORDER (stop at the first that applies):\n"
-                    "1) WIN NOW — if any move completes five-in-a-row for YOU, play it.\n"
-                    "2) BLOCK LOSS — if the opponent can win next move, block that line (unless you can win now).\n"
-                    "3) FORCING FOUR — create a forcing four ('.XXXX', 'XXXX.', or 'XXX.X').\n"
-                    "4) OPEN THREE FIRST — when no immediate win/loss threat, prefer making an OPEN THREE for yourself "
-                    "   ('.XXX.' or 'XX.X' if you are X; '.OOO.' or 'OO.O' if you are O) near your strongest chain.\n"
-                    "5) DOUBLE THREAT — create two independent threats (e.g., two open threes) to force a win.\n"
-                    "6) SHAPE & CENTER — otherwise extend your longest line with open ends; prefer central squares around (3,3)–(4,4).\n"
-                    "7) TIE-BREAKER — if still tied, choose the earliest move in LEGAL_MOVES.\n"
-                    "SELF-CHECK: ensure (row,col) ∈ LEGAL_MOVES and within 0..7. "
-                    "If your chosen move is not in LEGAL_MOVES, scan LEGAL_MOVES in order and output the first move that satisfies the highest rule."
-            },
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content":
-                    f"BOARD {board_size}x{board_size} (0-indexed):\n{board_str}\n\n"
+                "content": (
+                    f"BOARD {board_size}x{board_size}:\n{board_str}\n\n"
                     f"You play as: {player}\nOpponent: {rival}\n"
-                    "Note: if the board shows the digit '0', treat it exactly as 'O' (white stones).\n"
-                    f"LEGAL_MOVES (row,col): {game_state.get_legal_moves()}\n\n"
-                    "Apply the policy above and reply with JSON only."
+                    f"LEGAL_MOVES (row,col): {legal_moves_center_first}\n"
+                )
             },
         ]
 
-
-        # Send the messages to the language model and get the response
         content = await self.llm.complete(messages)
 
-        # Parse the LLM response to extract move coordinates
+        # ---------- 3) 解析 LLM 的落子 ----------
         try:
-            # Use regex to find JSON-like content in the response
             if m := re.search(r"{[^}]+}", content, re.DOTALL):
-                # Parse the JSON to extract row and column
                 move = json.loads(m.group(0))
-                row, col = (move["row"], move["col"])
-
-                # Validate that the proposed move is legal
+                row, col = move["row"], move["col"]
                 if game_state.is_valid_move(row, col):
                     return (row, col)
-        except json.JSONDecodeError as e:
-            # If JSON parsing fails, continue to fallback strategy
+        except Exception:
             pass
 
-        # Fallback: if LLM response is invalid, choose the first available legal move
-        return game_state.get_legal_moves()[0]
+        # ---------- 4) 兜底：离中心最近 ----------
+        return self._nearest_center_move(game_state)
