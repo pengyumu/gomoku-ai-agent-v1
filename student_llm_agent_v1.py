@@ -7,7 +7,7 @@ from gomoku.core.models import Player
 
 class StudentLLMAgentV1(Agent):
     def _setup(self):
-        self.llm = OpenAIGomokuClient(model="qwen/qwen3-8b")
+        self.llm = OpenAIGomokuClient(model="qwen/qwen-2.5-7b-instruct")
 
     def _get_max_chain_head(self, board, p):
         size = len(board)
