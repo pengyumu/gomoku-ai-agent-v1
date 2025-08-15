@@ -5,7 +5,7 @@ from gomoku.llm import OpenAIGomokuClient
 from gomoku.core.models import Player
 
 
-class StudentLLMAgentV3(Agent):
+class StudentLLMAgentV1(Agent):
     def _setup(self):
         """Initialize the LLM client."""
         self.llm = OpenAIGomokuClient(model="google/gemma-2-9b-it")
